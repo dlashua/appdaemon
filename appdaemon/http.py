@@ -83,6 +83,7 @@ class HTTP:
 
         self.appdaemon = appdaemon
         self.dashboard = dashboard
+        self.dashboard_dir = None
         self.admin = admin
         self.http = http
         self.api = api
@@ -199,8 +200,7 @@ class HTTP:
 
             if dashboard is not None:
                 self.logger.info("Starting Dashboards")
-
-                self.dashboard_dir = None
+                
                 self._process_arg("dashboard_dir", dashboard)
 
                 self.compile_on_start = True
@@ -608,6 +608,41 @@ class HTTP:
             self.logger.warning(traceback.format_exc())
             self.logger.warning('-' * 60)
             return web.Response(status=500)
+    
+    @securedata
+    async def fire_event(self, request):
+        try:
+            try:
+                data = await request.json()
+            except json.decoder.JSONDecodeError:
+                return self.get_response(request, 400, "JSON Decode Error")
+
+            args = {}
+            namespace = request.match_info.get('namespace')
+            event = request.match_info.get('event')
+            #
+            # Some value munging for dashboard
+            #
+            for key in data:
+                if key == "event":
+                    pass
+
+                else:
+                    args[key] = data[key]
+
+            self.logger.debug("fire_event() args = %s", args)
+
+            await self.AD.events.fire_event(namespace, event, **args)
+
+            return web.Response(status=200)
+
+        except:
+            self.logger.warning('-' * 60)
+            self.logger.warning("Unexpected error in fire_event()")
+            self.logger.warning('-' * 60)
+            self.logger.warning(traceback.format_exc())
+            self.logger.warning('-' * 60)
+            return web.Response(status=500)
 
     # noinspection PyUnusedLocal
     async def not_found(self, request):
@@ -624,6 +659,7 @@ class HTTP:
 
     def setup_api_routes(self):
         self.app.router.add_post('/api/appdaemon/service/{namespace}/{domain}/{service}', self.call_service)
+        self.app.router.add_post('/api/appdaemon/event/{namespace}/{event}', self.fire_event)
         self.app.router.add_get('/api/appdaemon/service/', self.get_services)
         self.app.router.add_get('/api/appdaemon/state/{namespace}/{entity}', self.get_entity)
         self.app.router.add_get('/api/appdaemon/state/{namespace}', self.get_namespace)

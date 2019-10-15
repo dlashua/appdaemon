@@ -35,6 +35,7 @@ class ADAPI:
         self.args = deepcopy(args)
         self.app_dir = self.AD.app_dir
         self.config_dir = self.AD.config_dir
+        self.dashboard_dir = self.AD.http.dashboard_dir
         self.global_vars = global_vars
         self._namespace = "default"
         self.logger = self._logging.get_child(name)
@@ -1457,7 +1458,8 @@ class ADAPI:
 
         return await self.AD.services.call_service(namespace, d, s, kwargs)
 
-    def run_sequence(self, sequence, **kwargs):
+    @utils.sync_wrapper
+    async def run_sequence(self, sequence, **kwargs):
         """Run an AppDaemon Sequence. Sequences are defined in a valid apps.yaml file or inline, and are sequences of
         service calls.
 
@@ -1474,16 +1476,16 @@ class ADAPI:
                 for a detailed description. In most cases, it is safe to ignore this parameter.
 
         Returns:
-            None.
+            A handle that can be used with `cancel_sequence()` to terminate the script.
 
         Examples:
             Run a yaml-defined sequence called "sequence.front_room_scene".
 
-            >>> self.run_sequence("sequence.front_room_scene")
+            >>> handle = self.run_sequence("sequence.front_room_scene")
 
             Run an inline sequence.
 
-            >>> self.run_sequence([{"light.turn_on": {"entity_id": "light.office_1"}}, {"sleep": 5}, {"light.turn_off":
+            >>> handle = self.run_sequence([{"light.turn_on": {"entity_id": "light.office_1"}}, {"sleep": 5}, {"light.turn_off":
             {"entity_id": "light.office_1"}}])
 
 
@@ -1496,7 +1498,27 @@ class ADAPI:
 
         _name = self.name
         self.logger.debug("Calling run_sequence() for %s", self.name)
-        self.AD.thread_async.call_async_no_wait(self.AD.services.run_sequence, _name, namespace, sequence, **kwargs)
+        return await self.AD.sequences.run_sequence( _name, namespace, sequence, **kwargs)
+
+    @utils.sync_wrapper
+    async def cancel_sequence(self, handle):
+        """Cancel an AppDaemon Sequence.
+
+        Args:
+            handle: The handle returned by the `run_sequence()` call
+
+        Returns:
+            None.
+
+        Examples:
+
+            >>> self.run_sequence(handle)
+
+        """
+
+        _name = self.name
+        self.logger.debug("Calling run_sequence() for %s", self.name)
+        await self.AD.sequences.cancel_sequence( _name, handle)
 
     #
     # Events
@@ -2578,6 +2600,88 @@ class ADAPI:
         self.fire_event("__HADASHBOARD_EVENT", **kwargs)
 
     #
+    # Async
+    #
+
+    async def run_in_executor(self, func, *args, **kwargs):
+        return await utils.run_in_executor(self, func, *args, **kwargs)
+
+    @utils.sync_wrapper
+    async def create_task(self, coro, callback=None, **kwargs):
+        """Schedules a Coroutine to be executed
+
+        Args:
+            coro: the coroutine object (not coroutine function) to be executed
+            callback: The non-async callback to be executed when complete
+            **kwargs: any additional keyword arguments to send the callback
+
+        Returns:
+            A Future, which can be cancelled by calling f.cancel()
+
+        Examples:
+            >>> f = self.create_task(asyncio.sleep(3), callback=self.coro_callback)
+            >>>
+            >>> def coro_callback(self, kwargs):
+
+        """
+        # get stuff we'll need to fake scheduler call
+        sched_data = {
+            "id": uuid.uuid4().hex,
+            "name": self.name,
+            "objectid": self.AD.app_management.objects[self.name]["id"],
+            "type": "scheduler",
+            "function": callback,
+            "pin_app": await self.get_app_pin(),
+            "pin_thread": await self.get_pin_thread(),
+        }
+
+        def callback_inner(f):
+            try:
+                # TODO: use our own callback type instead of borrowing
+                # from scheduler
+                kwargs["result"] = f.result()
+                sched_data["kwargs"] = kwargs
+                self.create_task(self.AD.threading.dispatch_worker(self.name, sched_data))
+
+                # callback(f.result(), kwargs)
+            except asyncio.CancelledError:
+                pass
+
+        f = asyncio.ensure_future(coro)
+        if callback is not None:
+            f.add_done_callback(callback_inner)
+
+        self.AD.futures.add_future(self.name, f)
+        return f
+
+    async def sleep(self, delay, result=None):
+        """Pause execution for a certain time span
+        (not available in sync apps)
+
+        Args:
+            delay: number of seconds to pause
+            result: optional result to return upon delay completion
+
+        Returns:
+            result or None.
+
+        Examples:
+            >>> async def myfunction(self):
+            >>>     await self.sleep(5)
+        """
+        is_async = None
+        try:
+            asyncio.get_event_loop()
+            is_async = True
+        except RuntimeError:
+            is_async = False
+
+        if not is_async:
+            raise RuntimeError("The sleep method is for use in ASYNC methods only")
+
+        return await asyncio.sleep(delay, result=result)
+
+    #
     # Other
     #
 
@@ -2638,57 +2742,6 @@ class ADAPI:
 
         """
         return await self.AD.callbacks.get_callback_entries()
-
-    async def run_in_executor(self, func, *args, **kwargs):
-        return await utils.run_in_executor(self, func, *args, **kwargs)
-
-    @utils.sync_wrapper
-    async def create_task(self, coro, callback=None, **kwargs):
-        """Schedules a Coroutine to be executed
-
-        Args:
-            coro: the coroutine (not coroutine function) to be executed
-            callback: The non-async callback to be executed when complete
-            **kwargs: any additional keyword arguments to send the callback
-
-        Returns:
-            A Future, which can be cancelled by calling f.cancel()
-
-        Examples:
-            >>> f = self.create_task(asyncio.sleep(3), callback=self.coro_callback)
-            >>>
-            >>> def coro_callback(self, kwargs):
-
-        """
-        # get stuff we'll need to fake scheduler call
-        sched_data = {
-            "id": uuid.uuid4().hex,
-            "name": self.name,
-            "objectid": self.AD.app_management.objects[self.name]["id"],
-            "type": "scheduler",
-            "function": callback,
-            "pin_app": await self.get_app_pin(),
-            "pin_thread": await self.get_pin_thread(),
-        }
-
-        def callback_inner(f):
-            try:
-                # TODO: use our own callback type instead of borrowing
-                # from scheduler
-                kwargs["result"] = f.result()
-                sched_data["kwargs"] = kwargs
-                self.create_task(self.AD.threading.dispatch_worker(self.name, sched_data))
-
-                # callback(f.result(), kwargs)
-            except asyncio.CancelledError:
-                pass
-
-        f = asyncio.ensure_future(coro)
-        if callback is not None:
-            f.add_done_callback(callback_inner)
-
-        self.AD.futures.add_future(self.name, f)
-        return f
 
     @utils.sync_wrapper
     async def depends_on_module(self, *modules):
