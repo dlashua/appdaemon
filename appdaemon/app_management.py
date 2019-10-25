@@ -145,6 +145,9 @@ class AppManagement:
                 await utils.run_in_executor(self, init)
             await self.set_state(name, state="idle")
             await self.increase_active_apps(name)
+            
+            event_data = {'app' : name}
+            await self.AD.events.fire_event('admin', 'app_initialized', **event_data)
 
         except TypeError:
             self.AD.threading.report_callback_sig(name, "initialize", init, {})
@@ -202,6 +205,9 @@ class AppManagement:
         self.AD.futures.cancel_futures(name)
 
         await self.AD.sched.terminate_app(name)
+        
+        event_data = {'app' : name}
+        await self.AD.events.fire_event('admin', 'app_terminated', **event_data)
 
         if self.AD.http is not None:
             await self.AD.http.terminate_app(name)
@@ -928,7 +934,7 @@ class AppManagement:
                     for dep in pend[1]:
                         deps += "{} ".format(dep)
                     self.logger.warning("%s depends on %s", pend[0], deps)
-                raise ValueError("cyclic dependancy detected")
+                raise ValueError("cyclic dependency detected")
             pending = next_pending
             emitted = next_emitted
 
@@ -985,7 +991,7 @@ class AppManagement:
             pass
 
         else:
-            self.logger.warning("App not specified when calling '%s' serivce. Specify App", service)
+            self.logger.warning("App not specified when calling '%s' service. Specify App", service)
             return None
 
         if service != "reload" and app not in self.app_config:
